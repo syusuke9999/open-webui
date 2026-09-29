@@ -769,6 +769,9 @@
 			data: {
 				active?: boolean;
 				folder_id?: string | null;
+				folder_ids?: string[];
+				folder_archive_updated?: boolean;
+				archived?: boolean;
 				last_read_at?: number;
 				folder_unread_counts?: Record<string, number>;
 			};
@@ -790,6 +793,24 @@
 			}
 		} else if (event.data?.type === 'chat:list') {
 			const eventData = event.data.data ?? {};
+			if (eventData.folder_archive_updated) {
+				const currentChatId = $chatId;
+				const currentChat =
+					eventData.archived && currentChatId
+						? await getChatById(localStorage.token, currentChatId).catch(() => null)
+						: null;
+				if (
+					eventData.archived &&
+					(($selectedFolder && eventData.folder_ids?.includes($selectedFolder.id)) ||
+						($chatId === currentChatId && eventData.folder_ids?.includes(currentChat?.folder_id)))
+				) {
+					selectedFolder.set(null);
+					await goto('/');
+				}
+				// This refreshes both the tree and every expanded folder chat list.
+				await refreshChatRows();
+				return;
+			}
 			const folderUnreadCounts = eventData.folder_unread_counts;
 			if (folderUnreadCounts) {
 				applyFolderUnreadCounts(folderUnreadCounts);

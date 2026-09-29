@@ -14,7 +14,7 @@ from open_webui.internal.db import Base, JSONField, get_async_db_context
 from open_webui.models.access_grants import AccessGrants
 from open_webui.models.automations import AutomationRun
 from open_webui.models.chat_messages import ChatMessage, ChatMessages
-from open_webui.models.folders import Folders
+from open_webui.models.folders import Folder, Folders
 from open_webui.models.tags import Tag, TagModel, Tags
 from open_webui.utils.misc import get_output_text, sanitize_data_for_db, sanitize_text_for_db
 from pydantic import BaseModel, ConfigDict, field_validator
@@ -139,6 +139,7 @@ class Chat(Base):  # database table mapping for chat entity
 
     share_id = Column(Text, unique=True, nullable=True)  # public share link token
     archived = Column(Boolean, default=False)  # hidden from main chat list
+    archived_by_folder_id = Column(Text, nullable=True, index=True)
     pinned = Column(Boolean, default=False, nullable=True)
 
     meta = Column(JSON, server_default='{}')
@@ -195,6 +196,7 @@ class ChatModel(BaseModel):
 
     share_id: str | None = None
     archived: bool = False
+    archived_by_folder_id: str | None = None
     pinned: bool | None = False
 
     meta: dict = {}
@@ -542,6 +544,8 @@ class ChatTable:
         timer_at: int | None = None,
     ) -> ChatModel | None:
         async with get_async_db_context(db) as session:
+            if form_data.folder_id:
+                await self._require_active_folder(form_data.folder_id, session)
             chat = ChatModel(
                 **{
                     'id': id,
@@ -662,8 +666,9 @@ class ChatTable:
             # Validate folder_id references — clear any that don't exist
             folder_ids = {f.folder_id for f in chat_import_forms if f.folder_id}
             existing = set()
-            for fid in folder_ids:
+            for fid in sorted(folder_ids):
                 if await Folders.get_folder_by_id_and_user_id(fid, user_id, db=session):
+                    await self._require_active_folder(fid, session)
                     existing.add(fid)
 
             cleared = 0
@@ -1356,7 +1361,12 @@ class ChatTable:
     async def unarchive_all_chats_by_user_id(self, user_id: str, db: AsyncSession | None = None) -> bool:
         try:
             async with get_async_db_context(db) as session:
-                await session.execute(update(Chat).filter_by(user_id=user_id).values(archived=False))
+                await session.execute(
+                    update(Chat)
+                    .filter_by(user_id=user_id, archived_by_folder_id=None)
+                    .where(~exists().where(Folder.id == Chat.folder_id, Folder.archive_root_id.is_not(None)))
+                    .values(archived=False)
+                )
                 await session.commit()
                 return True
         except Exception:
@@ -1390,7 +1400,12 @@ class ChatTable:
         try:
             async with get_async_db_context(db) as session:
                 chat = await session.get(Chat, id)
+                if chat.archived_by_folder_id:
+                    return None
+                if chat.folder_id:
+                    await self._require_active_folder(chat.folder_id, session)
                 chat.archived = not chat.archived
+                chat.archived_by_folder_id = None
                 chat.folder_id = None
                 chat.updated_at = int(time.time())
                 chat.last_read_at = int(time.time())
@@ -1418,8 +1433,9 @@ class ChatTable:
     ) -> list[ChatTitleIdResponse]:
         async with get_async_db_context(db) as session:
             stmt = select(Chat.id, Chat.title, Chat.updated_at, Chat.created_at).filter_by(
-                user_id=user_id, archived=True
+                user_id=user_id, archived=True, archived_by_folder_id=None
             )
+            stmt = stmt.where(~exists().where(Folder.id == Chat.folder_id, Folder.archive_root_id.is_not(None)))
             stmt = stmt.where(Chat.meta['internal'].as_boolean().is_not(True))
 
             if filter:
@@ -1468,7 +1484,8 @@ class ChatTable:
         db: AsyncSession | None = None,
     ) -> int:
         async with get_async_db_context(db) as session:
-            stmt = select(func.count(Chat.id)).filter_by(user_id=user_id, archived=True)
+            stmt = select(func.count(Chat.id)).filter_by(user_id=user_id, archived=True, archived_by_folder_id=None)
+            stmt = stmt.where(~exists().where(Folder.id == Chat.folder_id, Folder.archive_root_id.is_not(None)))
             result = await session.execute(stmt.where(Chat.meta['internal'].as_boolean().is_not(True)))
             return result.scalar() or 0
 
@@ -2263,13 +2280,25 @@ class ChatTable:
             all_chats = result.scalars().all()
             return [ChatModel.model_validate(chat) for chat in all_chats]
 
+    async def _require_active_folder(self, folder_id: str, db: AsyncSession) -> None:
+        # Serialize chat insertion/moves with folder archiving on databases that support row locks.
+        result = await db.execute(select(Folder).where(Folder.id == folder_id).with_for_update())
+        folder = result.scalars().first()
+        if not folder or folder.archive_root_id:
+            raise ValueError('Restore the archived folder before adding or moving chats.')
+
     async def update_chat_folder_id_by_id_and_user_id(
         self, id: str, user_id: str, folder_id: str, db: AsyncSession | None = None
     ) -> ChatModel | None:
         try:
             async with get_async_db_context(db) as session:
                 chat = await session.get(Chat, id)
+                if not chat or chat.user_id != user_id or chat.archived_by_folder_id:
+                    return None
+                for target_id in sorted({fid for fid in (chat.folder_id, folder_id) if fid}):
+                    await self._require_active_folder(target_id, session)
                 chat.folder_id = folder_id
+                chat.archived_by_folder_id = None
                 chat.updated_at = int(time.time())
                 chat.last_read_at = int(time.time())
                 chat.pinned = False

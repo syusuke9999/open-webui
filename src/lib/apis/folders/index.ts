@@ -66,6 +66,45 @@ export const getFolders = async (token: string = '') => {
 	return res;
 };
 
+export const getArchivedFolders = async (token: string) => {
+	const res = await fetch(`${WEBUI_API_BASE_URL}/folders/archived`, {
+		method: 'GET',
+		headers: {
+			Accept: 'application/json',
+			authorization: `Bearer ${token}`
+		}
+	});
+	if (!res.ok) {
+		const error = await res.json();
+		throw new Error(error.detail ?? 'Failed to load archived folders.');
+	}
+	return res.json();
+};
+
+export const updateFolderArchivedById = async (token: string, id: string, archived: boolean) => {
+	const res = await fetch(`${WEBUI_API_BASE_URL}/folders/${id}/archive`, {
+		method: 'POST',
+		headers: {
+			Accept: 'application/json',
+			'Content-Type': 'application/json',
+			authorization: `Bearer ${token}`
+		},
+		body: JSON.stringify({ archived })
+	});
+	if (!res.ok) {
+		const error = await res.json();
+		throw Object.assign(new Error(error.detail ?? 'Failed to update folder archive state.'), {
+			status: res.status
+		});
+	}
+	return res.json() as Promise<{
+		id: string;
+		archived: boolean;
+		folder_ids: string[];
+		chat_count: number;
+	}>;
+};
+
 export const getFolderById = async (token: string, id: string) => {
 	let error = null;
 

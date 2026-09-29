@@ -5,6 +5,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 async def has_folder_access(user_id: str, folder: FolderModel, permission: str, db: AsyncSession | None) -> bool:
     """Check if user has access to folder directly or via ancestor inheritance."""
+    if folder.archive_root_id:
+        return False
     # A corrupt parent loop must not spin forever
     seen_ids = set()
     while folder and folder.id not in seen_ids:

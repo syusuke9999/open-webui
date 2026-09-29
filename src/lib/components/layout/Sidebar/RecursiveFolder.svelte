@@ -12,6 +12,7 @@
 	import { toast } from 'svelte-sonner';
 
 	import { chatId, mobile, selectedFolder, showSidebar, user } from '$lib/stores';
+	import { refreshSidebar } from '$lib/stores/chatList';
 
 	import {
 		deleteFolderById,
@@ -21,7 +22,8 @@
 		getFolderById,
 		createNewFolder,
 		getSharedFolderChats,
-		markFolderChatsReadById
+		markFolderChatsReadById,
+		updateFolderArchivedById
 	} from '$lib/apis/folders';
 	import {
 		getChatById,
@@ -442,6 +444,33 @@
 	});
 
 	let showDeleteConfirm = false;
+	let showArchiveConfirm = false;
+	let archiving = false;
+
+	const archiveHandler = async () => {
+		if (archiving || folders[folderId]?.shared) return;
+		archiving = true;
+		try {
+			const currentChatId = $chatId;
+			const currentChat = currentChatId
+				? await getChatById(localStorage.token, currentChatId).catch(() => null)
+				: null;
+			const result = await updateFolderArchivedById(localStorage.token, folderId, true);
+			if (
+				($selectedFolder && result.folder_ids.includes($selectedFolder.id)) ||
+				($chatId === currentChatId && result.folder_ids.includes(currentChat?.folder_id))
+			) {
+				selectedFolder.set(null);
+				await goto('/');
+			}
+			toast.success($i18n.t('Folder archived.'));
+			await refreshSidebar(localStorage.token);
+		} catch (error) {
+			toast.error(error instanceof Error ? error.message : `${error}`);
+		} finally {
+			archiving = false;
+		}
+	};
 
 	const deleteHandler = async () => {
 		const res = await deleteFolderById(localStorage.token, folderId, deleteFolderContents).catch(
@@ -677,6 +706,20 @@
 </script>
 
 <DeleteConfirmDialog
+	bind:show={showArchiveConfirm}
+	title={$i18n.t('Archive folder?')}
+	confirmLabel={$i18n.t('Archive')}
+	on:confirm={archiveHandler}
+>
+	<div class="text-sm text-gray-700 dark:text-gray-300">
+		{$i18n.t(
+			'This will archive "{{NAME}}", its subfolders, and all their chats. This also affects people with shared access.',
+			{ NAME: folders[folderId]?.name ?? '' }
+		)}
+	</div>
+</DeleteConfirmDialog>
+
+<DeleteConfirmDialog
 	bind:show={showDeleteConfirm}
 	title={$i18n.t('Delete folder?')}
 	on:confirm={() => {
@@ -880,6 +923,12 @@
 								showCreateSubFolderModal = true;
 							}}
 							onMarkAllRead={markAllReadHandler}
+							{archiving}
+							onArchive={folders[folderId]?.shared
+								? null
+								: () => {
+										showArchiveConfirm = true;
+									}}
 						>
 							<div
 								class="flex size-5 items-center justify-center self-center dark:hover:text-white transition m-0 touch-auto"

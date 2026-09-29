@@ -41,3 +41,23 @@ jobs:
 
       - name: Detect logic errors
         run: ruff check --select=F --ignore=F401,F403,F405,F541,F811,F841 --output-format=github .
+
+  folder-archive-tests:
+    name: Folder Archive Tests (${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.11', '3.12']
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install isolated test dependencies
+        run: >-
+          pip install sqlalchemy==2.0.50 aiosqlite==0.22.1 pydantic==2.13.4
+          fastapi==0.136.3 httpx==0.28.1 alembic==1.18.4
+      - name: Test folder archiving with an in-memory database
+        run: python -m unittest discover -s backend/tests -p test_folder_archiving.py -v

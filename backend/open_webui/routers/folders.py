@@ -16,6 +16,7 @@ from open_webui.models.chat_messages import ChatMessages
 from open_webui.models.config import Config
 from open_webui.models.chats import Chats
 from open_webui.models.folders import (
+    FolderArchiveConflictError,
     FolderForm,
     FolderModel,
     FolderNameIdResponse,
@@ -26,13 +27,14 @@ from open_webui.models.access_grants import AccessGrants
 from open_webui.models.automations import Automations
 from open_webui.models.groups import Groups
 from open_webui.models.users import Users
+from open_webui.socket.main import sio
 from open_webui.utils.access_control import has_permission
 from open_webui.utils.access_control import (
     filter_allowed_access_grants,
 )
 from open_webui.utils.access_control.files import can_read_all_folder_files, get_accessible_folder_files
 from open_webui.utils.auth import get_admin_user, get_verified_user
-from open_webui.tasks import has_active_tasks
+from open_webui.tasks import has_active_tasks, stop_item_tasks
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -83,6 +85,11 @@ async def check_folders_permission(request: Request, user, db=None):
         )
 
 
+def require_active_folder(folder: FolderModel):
+    if folder.archive_root_id:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail='Restore the folder before changing it')
+
+
 ############################
 # Get Folders
 ############################
@@ -114,6 +121,9 @@ async def get_folders(
     # Verify folder data integrity
     folder_list = []
     for folder in folders:
+        # Archived folders remain in the full parent map, but are not sidebar items.
+        if folder.archive_root_id:
+            continue
         # A missing or looping parent hides the folder from the tree, so put it back at the root
         if folder.parent_id and (folder.parent_id not in parent_by_id or is_in_parent_cycle(folder.id)):
             parent_by_id[folder.id] = None
@@ -137,6 +147,67 @@ async def get_folders(
         FolderNameIdResponse(**folder.model_dump(), unread_count=unread_counts.get(folder.id, 0))
         for folder in folder_list
     ]
+
+
+@router.get('/archived', response_model=list[FolderNameIdResponse])
+async def get_archived_folders(
+    request: Request,
+    user=Depends(get_verified_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    await check_folders_permission(request, user, db=db)
+    return await Folders.get_archived_folders_by_user_id(user.id, db=db)
+
+
+class FolderArchiveForm(BaseModel):
+    archived: bool
+
+
+@router.post('/{id}/archive')
+async def set_folder_archived_by_id(
+    request: Request,
+    id: str,
+    form_data: FolderArchiveForm,
+    user=Depends(get_verified_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    await check_folders_permission(request, user, db=db)
+    try:
+        result = await Folders.set_folder_archive_by_id_and_user_id(id, user.id, form_data.archived, db=db)
+    except FolderArchiveConflictError as error:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+
+    if result is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=ERROR_MESSAGES.NOT_FOUND)
+
+    chat_ids = result.pop('chat_ids')
+    chat_updates = result.pop('chat_updates')
+    if form_data.archived:
+        for chat_id in chat_ids:
+            try:
+                await stop_item_tasks(request.app.state.redis, chat_id)
+            except Exception:
+                log.exception('Failed to stop a task after archiving its folder')
+    if result['folder_ids']:
+        await publish_event(request, EVENTS.FOLDER_UPDATED, actor=user, subject_id=id, data=result)
+        for owner_id in {user.id, *(chat['user_id'] for chat in chat_updates)}:
+            await sio.emit(
+                'events',
+                {
+                    'chat_id': '',
+                    'data': {
+                        'type': 'chat:list',
+                        'data': {
+                            'folder_id': id,
+                            'folder_ids': result['folder_ids'],
+                            'folder_archive_updated': True,
+                            'archived': form_data.archived,
+                        },
+                    },
+                },
+                room=f'user:{owner_id}',
+            )
+    return result
 
 
 ############################
@@ -165,6 +236,8 @@ async def create_folder(
     # Check if creating a subfolder in a shared folder
     if form_data.parent_id:
         parent = await Folders.get_folder_by_id(form_data.parent_id, db=db)
+        if parent:
+            require_active_folder(parent)
         if parent and parent.user_id != user.id:
             # Creating subfolder in someone else's shared folder
             if user.role != 'admin' and not await _has_folder_access(user.id, parent, 'write', db):
@@ -195,6 +268,8 @@ async def create_folder(
                     data={'name': folder.name, 'parent_id': folder.parent_id, 'owner_id': folder.user_id},
                 )
                 return folder
+            except FolderArchiveConflictError as error:
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
             except Exception as e:
                 log.exception(e)
                 raise HTTPException(
@@ -222,6 +297,8 @@ async def create_folder(
             data={'name': folder.name, 'parent_id': folder.parent_id, 'owner_id': folder.user_id},
         )
         return folder
+    except FolderArchiveConflictError as error:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
     except Exception as e:
         log.exception(e)
         log.error('Error creating folder')
@@ -250,7 +327,7 @@ async def get_shared_folders(
     folder_perms = await Folders.get_shared_folder_ids_for_user(user.id, group_ids, db=db)
 
     folders = await Folders.get_folders_by_ids(list(folder_perms.keys()), db=db)
-    shared_folders = [folder for folder in folders if folder.user_id != user.id]
+    shared_folders = [folder for folder in folders if folder.user_id != user.id and not folder.archive_root_id]
 
     owners = await Users.get_users_by_user_ids([folder.user_id for folder in shared_folders], db=db)
     owner_names = {owner.id: owner.name for owner in owners}
@@ -269,7 +346,7 @@ async def get_shared_folders(
     for folder in shared_folders:
         children = await Folders.get_children_folders_by_id_and_user_id(folder.id, folder.user_id, db=db)
         for child in children or []:
-            if child.id not in seen_ids:
+            if child.id not in seen_ids and not child.archive_root_id:
                 seen_ids.add(child.id)
                 results.append(
                     {
@@ -303,12 +380,16 @@ async def get_folder_by_id(
         return FolderResponse(
             **folder.model_dump(),
             access_grants=[g.model_dump() for g in grants],
-            write_access=True,
+            write_access=not folder.archive_root_id,
         )
 
     # Check shared access
     folder = await Folders.get_folder_by_id(id, db=db)
-    if folder and (user.role == 'admin' or await _has_folder_access(user.id, folder, 'read', db)):
+    if (
+        folder
+        and not folder.archive_root_id
+        and (user.role == 'admin' or await _has_folder_access(user.id, folder, 'read', db))
+    ):
         grants = await AccessGrants.get_grants_by_resource('folder', id, db=db)
         return FolderResponse(
             **folder.model_dump(),
@@ -347,6 +428,7 @@ async def update_folder_name_by_id(
             )
 
     if folder:
+        require_active_folder(folder)
         if form_data.name is not None:
             # Check if folder with same name exists
             existing_folder = await Folders.get_folder_by_parent_id_and_user_id_and_name(
@@ -381,6 +463,8 @@ async def update_folder_name_by_id(
                 data={'name': folder.name},
             )
             return folder
+        except FolderArchiveConflictError as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
         except Exception as e:
             log.exception(e)
             log.error(f'Error updating folder: {id}')
@@ -410,6 +494,11 @@ async def update_folder_parent_id_by_id(
     await check_folders_permission(request, user, db=db)
     folder = await Folders.get_folder_by_id_and_user_id(id, user.id, db=db)
     if folder:
+        require_active_folder(folder)
+        if form_data.parent_id:
+            parent = await Folders.get_folder_by_id(form_data.parent_id, db=db)
+            if parent:
+                require_active_folder(parent)
         existing_folder = await Folders.get_folder_by_parent_id_and_user_id_and_name(
             form_data.parent_id, user.id, folder.name, db=db
         )
@@ -438,6 +527,8 @@ async def update_folder_parent_id_by_id(
                 data={'parent_id': form_data.parent_id},
             )
             return folder
+        except FolderArchiveConflictError as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
         except Exception as e:
             log.exception(e)
             log.error(f'Error updating folder: {id}')
@@ -473,15 +564,20 @@ async def update_folder_is_expanded_by_id(
     folder = await Folders.get_folder_by_id_and_user_id(id, user.id, db=db)
     if not folder:
         folder = await Folders.get_folder_by_id(id, db=db)
+        if folder:
+            require_active_folder(folder)
         if folder and (user.role == 'admin' or await _has_folder_access(user.id, folder, 'read', db)):
             return folder
 
     if folder:
+        require_active_folder(folder)
         try:
             folder = await Folders.update_folder_is_expanded_by_id_and_user_id(
                 id, user.id, form_data.is_expanded, db=db
             )
             return folder
+        except FolderArchiveConflictError as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
         except Exception as e:
             log.exception(e)
             log.error(f'Error updating folder: {id}')
@@ -529,6 +625,7 @@ async def update_folder_access_by_id(
                 detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
             )
 
+    require_active_folder(folder)
     form_data.access_grants = await filter_allowed_access_grants(
         await Config.get('user.permissions'),
         user.id,
@@ -572,7 +669,7 @@ async def get_shared_folder_chats(
     """Get chats within a shared folder. Returns readonly flag based on permission."""
     await check_folders_permission(request, user, db=db)
     folder = await Folders.get_folder_by_id(id, db=db)
-    if not folder:
+    if not folder or folder.archive_root_id:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=ERROR_MESSAGES.NOT_FOUND,
@@ -640,6 +737,7 @@ async def mark_folder_chats_read_by_id(
             detail=ERROR_MESSAGES.NOT_FOUND,
         )
 
+    require_active_folder(folder)
     is_owner = user.id == folder.user_id
     is_admin = user.role == 'admin'
     if not (is_owner or is_admin or await _has_folder_access(user.id, folder, 'read', db)):
@@ -696,6 +794,12 @@ async def delete_folder_by_id(
     folder_owner_id = folder.user_id
 
     folder_ids = await Folders.get_folder_ids_by_id_and_user_id_in_subtree(id, folder_owner_id, db=db)
+    subtree = await Folders.get_folders_by_ids(folder_ids, db=db)
+    if any(item.archive_root_id for item in subtree):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail='Restore archived folders in this subtree before deleting it',
+        )
     if delete_contents and await Chats.count_chats_by_folder_ids_and_user_id(folder_ids, folder_owner_id, db=db):
         chat_delete_permission = await has_permission(
             user.id, 'chat.delete', await Config.get('user.permissions'), db=db
@@ -733,6 +837,8 @@ async def delete_folder_by_id(
                     data={'folder_ids': folder_ids, 'delete_contents': delete_contents},
                 )
                 return True
+            except FolderArchiveConflictError as error:
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
             except Exception as e:
                 log.exception(e)
                 log.error(f'Error deleting folder: {id}')

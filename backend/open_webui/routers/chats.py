@@ -1915,7 +1915,15 @@ async def archive_chat_by_id(
 ):
     chat = await Chats.get_chat_by_id_and_user_id(id, user.id, db=db)
     if chat:
+        if chat.archived_by_folder_id or (
+            chat.folder_id
+            and (folder := await Folders.get_folder_by_id(chat.folder_id, db=db))
+            and folder.archive_root_id
+        ):
+            raise HTTPException(status_code=409, detail='Restore the archived folder first.')
         chat = await Chats.toggle_chat_archive_by_id(id, db=db)
+        if not chat:
+            raise HTTPException(status_code=409, detail='Unable to change the archive state of this chat.')
 
         tag_ids = chat.meta.get('tags', [])
         if chat.archived:
@@ -2133,6 +2141,12 @@ async def update_chat_folder_id_by_id(
 ):
     chat = await Chats.get_chat_by_id_and_user_id(id, user.id, db=db)
     if chat:
+        if chat.archived_by_folder_id or (
+            chat.folder_id
+            and (folder := await Folders.get_folder_by_id(chat.folder_id, db=db))
+            and folder.archive_root_id
+        ):
+            raise HTTPException(status_code=409, detail='Restore the archived folder first.')
         # None is allowed: it moves the chat out of any folder.
         if form_data.folder_id is not None and not await has_folder_write_access(user.id, form_data.folder_id, db=db):
             raise HTTPException(
@@ -2141,6 +2155,8 @@ async def update_chat_folder_id_by_id(
             )
 
         chat = await Chats.update_chat_folder_id_by_id_and_user_id(id, user.id, form_data.folder_id, db=db)
+        if not chat:
+            raise HTTPException(status_code=409, detail='Unable to move this chat. Restore its folder first.')
         await publish_event(
             request,
             EVENTS.CHAT_FOLDER_UPDATED,

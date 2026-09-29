@@ -19,7 +19,8 @@
 		getArchivedChatList,
 		unarchiveAllChats
 	} from '$lib/apis/chats';
-	import { chatId, showSettings, user } from '$lib/stores';
+	import { getArchivedFolders, updateFolderArchivedById } from '$lib/apis/folders';
+	import { chatId, config, showSettings, user } from '$lib/stores';
 	import { refreshChatList, refreshSidebar } from '$lib/stores/chatList';
 	import { formatNumber } from '$lib/utils';
 	import ConfirmDialog from '$lib/components/common/ConfirmDialog.svelte';
@@ -31,6 +32,7 @@
 	import ChevronDown from '$lib/components/icons/ChevronDown.svelte';
 	import ChevronUp from '$lib/components/icons/ChevronUp.svelte';
 	import Download from '$lib/components/icons/Download.svelte';
+	import FolderIcon from '$lib/components/icons/Folder.svelte';
 	import Search from '$lib/components/icons/Search.svelte';
 	import Trash from '$lib/components/icons/Trash.svelte';
 	import UndoAction from '$lib/components/icons/UndoAction.svelte';
@@ -57,6 +59,15 @@
 	let selectedChatId: string | null = null;
 	let showDeleteConfirmDialog = false;
 	let showUnarchiveAllConfirmDialog = false;
+	let archivedFolders: any[] | null = null;
+	let foldersLoadFailed = false;
+	let restoringFolderId: string | null = null;
+	$: foldersEnabled =
+		$config?.features?.enable_folders &&
+		($user?.role === 'admin' || ($user?.permissions?.features?.folders ?? true));
+	$: filteredFolders = (archivedFolders ?? []).filter((folder) =>
+		folder.name.toLocaleLowerCase().includes(query.toLocaleLowerCase())
+	);
 
 	const getFilter = () => ({
 		...(query ? { query } : {}),
@@ -70,6 +81,38 @@
 		chatList = await getArchivedChatList(localStorage.token, page, getFilter());
 		allChatsLoaded = (chatList ?? []).length === 0;
 		chatCount = await getArchivedChatCount(localStorage.token);
+	};
+
+	const loadFolders = async () => {
+		if (!foldersEnabled) return;
+		foldersLoadFailed = false;
+		try {
+			archivedFolders = await getArchivedFolders(localStorage.token);
+		} catch (error) {
+			foldersLoadFailed = true;
+			toast.error(error instanceof Error ? error.message : `${error}`);
+		}
+	};
+
+	const unarchiveFolderHandler = async (id: string) => {
+		if (restoringFolderId || !foldersEnabled) return;
+		restoringFolderId = id;
+		try {
+			await updateFolderArchivedById(localStorage.token, id, false);
+			archivedFolders = archivedFolders?.filter((folder) => folder.id !== id) ?? null;
+			toast.success($i18n.t('Folder unarchived.'));
+			await Promise.all([loadFolders(), loadChats(), refreshSidebar(localStorage.token)]);
+		} catch (error) {
+			toast.error(
+				error instanceof Error && 'status' in error && error.status === 409
+					? $i18n.t('Unarchive the parent folder first.')
+					: error instanceof Error
+						? error.message
+						: `${error}`
+			);
+		} finally {
+			restoringFolderId = null;
+		}
 	};
 
 	const searchHandler = () => {
@@ -162,7 +205,10 @@
 		}
 	};
 
-	onMount(loadChats);
+	onMount(() => {
+		loadChats();
+		loadFolders();
+	});
 </script>
 
 <ConfirmDialog
@@ -269,6 +315,61 @@
 	</div>
 
 	<div class="mt-3 flex-1 min-h-0 overflow-y-auto scrollbar-hover pr-1.5">
+		{#if foldersEnabled}
+			<div class="mb-4">
+				<h3 class="mb-1 px-1 text-xs font-medium text-gray-700 dark:text-gray-300">
+					{$i18n.t('Archived Folders')}
+				</h3>
+				{#if foldersLoadFailed}
+					<button
+						class="px-1 py-2 text-xs text-gray-500 hover:text-gray-900 dark:hover:text-white"
+						type="button"
+						on:click={loadFolders}
+					>
+						{$i18n.t('Failed to load archived folders. Click to retry.')}
+					</button>
+				{:else if archivedFolders === null}
+					<div class="flex h-10 items-center justify-center">
+						<Spinner className="size-4" />
+					</div>
+				{/if}
+				{#if archivedFolders !== null}
+					{#each filteredFolders as folder (folder.id)}
+						<div class="flex w-full items-center gap-2 px-1 py-1 text-xs">
+							<FolderIcon className="size-3.5 shrink-0 text-gray-400 dark:text-gray-600" />
+							<span
+								class="min-w-0 flex-1 truncate text-gray-600 dark:text-gray-400"
+								title={folder.name}
+							>
+								{folder.name}
+							</span>
+							<Tooltip content={$i18n.t('Unarchive Folder')}>
+								<button
+									class="rounded-lg p-1 text-gray-400 transition-colors hover:text-gray-700 disabled:opacity-30 dark:text-gray-600 dark:hover:text-gray-300"
+									type="button"
+									aria-label={$i18n.t('Unarchive Folder')}
+									disabled={restoringFolderId !== null}
+									on:click={() => unarchiveFolderHandler(folder.id)}
+								>
+									{#if restoringFolderId === folder.id}
+										<Spinner className="size-3.5" />
+									{:else}
+										<UndoAction className="size-3.5" strokeWidth="1.5" />
+									{/if}
+								</button>
+							</Tooltip>
+						</div>
+					{:else}
+						<div class="px-1 py-2 text-xs text-gray-500 dark:text-gray-400">
+							{query ? $i18n.t('No results found') : $i18n.t('You have no archived folders.')}
+						</div>
+					{/each}
+				{/if}
+			</div>
+			<h3 class="mb-1 px-1 text-xs font-medium text-gray-700 dark:text-gray-300">
+				{$i18n.t('settings.personal.archivedChats.title')}
+			</h3>
+		{/if}
 		{#if chatList === null}
 			<div class="flex min-h-20 items-center justify-center">
 				<Spinner className="size-5" />

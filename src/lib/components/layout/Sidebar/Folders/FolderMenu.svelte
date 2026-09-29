@@ -1,7 +1,8 @@
 <script lang="ts">
 	import { getContext, createEventDispatcher } from 'svelte';
+	import type { Writable } from 'svelte/store';
 
-	const i18n = getContext('i18n');
+	const i18n: Writable<any> = getContext('i18n');
 	const dispatch = createEventDispatcher();
 
 	import Dropdown from '$lib/components/common/Dropdown.svelte';
@@ -13,6 +14,7 @@
 	import Tooltip from '$lib/components/common/Tooltip.svelte';
 	import Download from '../icons/Download.svelte';
 	import CheckIcon from '$lib/components/icons/Check.svelte';
+	import ArchiveIcon from '../icons/Archive.svelte';
 
 	export let align: 'start' | 'end' = 'start';
 	export let onEdit = () => {};
@@ -21,6 +23,8 @@
 	export let onDelete = () => {};
 	export let onCreateSubFolder = () => {};
 	export let onMarkAllRead = () => {};
+	export let onArchive: (() => void) | null = null;
+	export let archiving = false;
 
 	let show = false;
 </script>
@@ -103,6 +107,20 @@
 			</button>
 
 			<hr class="border-gray-50/30 dark:border-gray-800/30 mx-1 my-0.5" />
+
+			{#if onArchive}
+				<button
+					class="flex h-[1.6875rem] w-full items-center gap-2 rounded-xl px-2 text-[0.8125rem] select-none cursor-pointer hover:bg-gray-100 disabled:cursor-default disabled:opacity-50 dark:hover:bg-gray-900"
+					disabled={archiving}
+					on:click={() => {
+						show = false;
+						onArchive?.();
+					}}
+				>
+					<ArchiveIcon className="size-3.5" />
+					<div class="flex items-center">{$i18n.t('Archive Folder')}</div>
+				</button>
+			{/if}
 
 			<button
 				class="flex h-[1.6875rem] w-full items-center gap-2 rounded-xl px-2 text-[0.8125rem] select-none cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-900"

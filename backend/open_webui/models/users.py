@@ -846,6 +846,7 @@ class UsersTable:
 
     async def delete_user_by_id(self, id: str, db: AsyncSession | None = None) -> bool:
         from open_webui.models.chats import Chats
+        from open_webui.models.folders import Folders
         from open_webui.models.groups import Groups
 
         # Remove User from Groups
@@ -853,12 +854,17 @@ class UsersTable:
 
         # Delete User Chats
         async with get_async_db_context(db) as session:
-            deleted_chats = await Chats.delete_chats_by_user_id(id, db=session)
-            if not deleted_chats:
-                return False  # chats deletion failed
-            await session.execute(delete(User).where(User.id == id))
-            await session.commit()
-            return True
+            try:
+                deleted_chats = await Chats.delete_chats_by_user_id(id, db=session)
+                if not deleted_chats:
+                    return False  # chats deletion failed
+                await Folders.release_archives_for_deleted_user(id, session)
+                await session.execute(delete(User).where(User.id == id))
+                await session.commit()
+                return True
+            except BaseException:
+                await session.rollback()
+                raise
 
     async def get_user_api_key_by_id(self, id: str, db: AsyncSession | None = None) -> str | None:
         async with get_async_db_context(db) as session:
