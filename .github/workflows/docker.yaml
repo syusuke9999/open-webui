@@ -309,7 +309,7 @@ jobs:
 
   copy-to-dockerhub:
     runs-on: ubuntu-latest
-    if: ${{ !cancelled() && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) }}
+    if: ${{ github.repository == 'open-webui/open-webui' && !cancelled() && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) }}
     needs: [merge]
     strategy:
       fail-fast: false
