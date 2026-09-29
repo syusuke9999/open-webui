@@ -46,6 +46,7 @@ from open_webui.utils.payload import (
     apply_system_prompt_to_body,
 )
 from open_webui.utils.session_pool import cleanup_response, get_client_timeout, get_session, stream_wrapper
+from open_webui.utils.weave_tracing import start_provider_trace
 from pydantic import BaseModel, ConfigDict, validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -59,6 +60,14 @@ log = logging.getLogger(__name__)
 _STRIP_PROXY_HEADERS = frozenset({'content-encoding', 'content-length', 'transfer-encoding', 'server', 'date'})
 _MODEL_LIST_TIMEOUT = aiohttp.ClientTimeout(total=AIOHTTP_CLIENT_TIMEOUT_MODEL_LIST)
 BASE_MODELS_CACHE_KEY = f'{REDIS_KEY_PREFIX}:models:base'
+_TRACED_GENERATION_ENDPOINTS = {
+    '/api/chat': ('ollama.chat', 'ndjson'),
+    '/api/generate': ('ollama.generate', 'ndjson'),
+    '/v1/chat/completions': ('ollama.chat.completions', 'sse'),
+    '/v1/completions': ('ollama.completions', 'sse'),
+    '/v1/responses': ('ollama.responses', 'sse'),
+    '/v1/messages': ('ollama.messages', 'sse'),
+}
 
 
 def _clean_proxy_headers(raw_headers) -> dict:
@@ -111,6 +120,7 @@ async def send_request(
 ):
     r = None
     streaming = False
+    trace = None
     try:
         session = await get_session()
 
@@ -128,6 +138,19 @@ async def send_request(
         if api_config and api_config.get('headers'):
             headers.update(await get_custom_headers(api_config['headers'], user, metadata, request=request))
 
+        endpoint = urlparse(url).path.rstrip('/')
+        trace_operation = next(
+            (operation for path, operation in _TRACED_GENERATION_ENDPOINTS.items() if endpoint.endswith(path)),
+            None,
+        )
+        if trace_operation is not None:
+            trace = start_provider_trace(
+                provider='ollama',
+                operation=trace_operation[0],
+                url=url,
+                payload=payload,
+                metadata=metadata,
+            )
         r = await session.request(
             method,
             url,
@@ -136,10 +159,14 @@ async def send_request(
             ssl=AIOHTTP_CLIENT_SESSION_SSL,
             timeout=get_client_timeout(stream=stream),
         )
+        if trace is not None:
+            trace.set_status(r.status)
 
         if not r.ok:
             try:
                 res = await r.json(loads=JSONCodec.loads)
+                if trace is not None:
+                    trace.finish(output=res)
                 await publish_model_provider_request_failed(
                     request,
                     actor=user,
@@ -153,6 +180,11 @@ async def send_request(
             except HTTPException:
                 raise
             except Exception as e:
+                if trace is not None:
+                    try:
+                        trace.finish(output=await r.text())
+                    except Exception:
+                        trace.finish(exception=e)
                 log.error(f'Failed to parse error response: {e}')
                 await publish_model_provider_request_failed(
                     request,
@@ -173,27 +205,48 @@ async def send_request(
             if content_type:
                 response_headers['Content-Type'] = content_type
 
+            response_stream = stream_wrapper(r, passthrough=passthrough)
+            if trace is not None:
+                response_stream = trace.wrap_stream(response_stream, protocol=trace_operation[1])
             streaming = True
             return StreamingResponse(
-                stream_wrapper(r, passthrough=passthrough),
+                response_stream,
                 status_code=r.status,
                 headers=response_headers,
             )
         else:
             try:
-                return await r.json(loads=JSONCodec.loads)
-            except Exception:
+                response = await r.json(loads=JSONCodec.loads)
+                if trace is not None:
+                    trace.finish(output=response)
+                return response
+            except Exception as e:
+                if trace is not None:
+                    try:
+                        trace.finish(output=await r.text())
+                    except Exception:
+                        trace.finish(exception=e)
                 return None
 
-    except HTTPException:
+    except asyncio.CancelledError as e:
+        if trace is not None:
+            trace.finish(exception=e)
+        raise
+    except HTTPException as e:
+        if trace is not None:
+            trace.finish(exception=e)
         raise
     except Exception as e:
+        if trace is not None:
+            trace.finish(exception=e)
         raise HTTPException(
             status_code=r.status if r else 500,
             detail=f'Ollama: {e}' if str(e) else ERROR_MESSAGES.SERVER_CONNECTION_ERROR,
         )
     finally:
         if not streaming:
+            if trace is not None:
+                trace.finish()
             await cleanup_response(r)
 
 

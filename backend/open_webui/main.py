@@ -276,6 +276,7 @@ from open_webui.utils.tool_approval import (
     resolve_tool_call_output,
 )
 from open_webui.utils.tools import set_terminal_servers, set_tool_servers
+from open_webui.utils.weave_tracing import initialize_weave, shutdown_weave, start_provider_trace
 
 if SAFE_MODE:
     print('SAFE MODE ENABLED')
@@ -359,6 +360,7 @@ async def lifespan(app: FastAPI):
 
     app.state.instance_id = INSTANCE_ID
     start_logger()
+    await initialize_weave()
 
     if RESET_CONFIG_ON_START:
         await async_reset_config()
@@ -479,6 +481,7 @@ async def lifespan(app: FastAPI):
     from open_webui.utils.session_pool import close_session
 
     await close_session()
+    await shutdown_weave()
 
     if hasattr(app.state, 'redis_task_command_listener'):
         app.state.redis_task_command_listener.cancel()
@@ -1945,25 +1948,34 @@ async def passthrough_anthropic_messages(request: Request, form_data: dict, user
         request, form_data, user
     )
     request_url = f'{url.rstrip("/")}/messages'
+    body = JSONCodec.dumps(payload)
     response = None
     streaming = False
+    trace = start_provider_trace(
+        provider='anthropic',
+        operation='anthropic.messages',
+        url=request_url,
+        payload=body,
+        metadata=form_data.get('metadata'),
+    )
 
     try:
         session = await get_session()
         response = await session.request(
             method='POST',
             url=request_url,
-            data=JSONCodec.dumps(payload),
+            data=body,
             headers=headers,
             cookies=cookies,
             ssl=AIOHTTP_CLIENT_SESSION_SSL,
             timeout=get_client_timeout(stream=bool(payload.get('stream'))),
         )
+        trace.set_status(response.status)
 
         if 'text/event-stream' in response.headers.get('Content-Type', ''):
             streaming = True
             return StreamingResponse(
-                stream_wrapper(response),
+                trace.wrap_stream(stream_wrapper(response), protocol='sse'),
                 status_code=response.status,
                 headers=openai._clean_proxy_headers(response.headers),
             )
@@ -1972,6 +1984,8 @@ async def passthrough_anthropic_messages(request: Request, form_data: dict, user
             response_data = await response.json()
         except Exception:
             response_data = await response.text()
+
+        trace.finish(output=response_data)
 
         if response.status >= 400:
             await openai.publish_model_provider_request_failed(
@@ -1989,13 +2003,19 @@ async def passthrough_anthropic_messages(request: Request, form_data: dict, user
             return Response(status_code=response.status, content=response_data)
 
         return response_data
-    except HTTPException:
+    except HTTPException as exc:
+        trace.finish(exception=exc)
         raise
-    except Exception:
+    except asyncio.CancelledError as exc:
+        trace.finish(exception=exc)
+        raise
+    except Exception as exc:
+        trace.finish(exception=exc)
         log.exception('Failed to passthrough Anthropic Messages request for model %s', requested_model)
         raise HTTPException(status_code=502, detail=ERROR_MESSAGES.SERVER_CONNECTION_ERROR)
     finally:
         if not streaming:
+            trace.finish()
             await cleanup_response(response)
 
 

@@ -1,0 +1,11 @@
+# docker compose -f docker-compose.yaml -f docker-compose.weave.yaml up -d --build
+services:
+  open-webui:
+    build:
+      args:
+        USE_WEAVE: 'true'
+    environment:
+      ENABLE_WEAVE: 'true'
+      WEAVE_PROJECT: ${WEAVE_PROJECT:?Set WEAVE_PROJECT to your W&B entity/project}
+      WANDB_API_KEY: ${WANDB_API_KEY:?Set WANDB_API_KEY}
+      WEAVE_MAX_CAPTURE_BYTES: ${WEAVE_MAX_CAPTURE_BYTES:-2097152}

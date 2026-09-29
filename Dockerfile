@@ -4,6 +4,7 @@
 ARG USE_CUDA=false
 ARG USE_OLLAMA=false
 ARG USE_SLIM=false
+ARG USE_WEAVE=false
 ARG USE_PERMISSION_HARDENING=false
 # Tested with cu117 for CUDA 11 and cu121 for CUDA 12 (default)
 ARG USE_CUDA_VER=cu128
@@ -60,6 +61,7 @@ ARG USE_CUDA
 ARG USE_OLLAMA
 ARG USE_CUDA_VER
 ARG USE_SLIM
+ARG USE_WEAVE
 ARG USE_PERMISSION_HARDENING
 ARG USE_EMBEDDING_MODEL
 ARG USE_RERANKING_MODEL
@@ -176,6 +178,13 @@ RUN --mount=from=ghcr.io/astral-sh/uv:0.12.10,source=/uv,target=/bin/uv \
     python -c "import os; from sentence_transformers import SentenceTransformer; SentenceTransformer(os.environ.get('AUXILIARY_EMBEDDING_MODEL', 'TaylorAI/bge-micro-v2'), device='cpu')"; \
     python -c "import os; from faster_whisper import WhisperModel; WhisperModel(os.environ['WHISPER_MODEL'], device='cpu', compute_type='int8', download_root=os.environ['WHISPER_MODEL_DIR'])"; \
     python -c "import os; import tiktoken; tiktoken.get_encoding(os.environ['TIKTOKEN_ENCODING_NAME'])"; \
+    fi; \
+    fi; \
+    if [ "$USE_WEAVE" = "true" ]; then \
+    if [ "$USE_SLIM" = "true" ]; then \
+    uv pip install --system -r requirements-slim.txt -r requirements-weave.txt --no-cache-dir; \
+    else \
+    uv pip install --system -r requirements.txt -r requirements-weave.txt --no-cache-dir; \
     fi; \
     fi; \
     mkdir -p /app/backend/data; chown -R $UID:$GID /app/backend/data/; \

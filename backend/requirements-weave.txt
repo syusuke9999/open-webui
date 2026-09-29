@@ -1,0 +1,3 @@
+# Optional W&B Weave tracing. Resolve together with requirements.txt or requirements-slim.txt
+# to preserve the application's OpenTelemetry pins (newer wandb releases may require newer ones).
+weave==0.52.36

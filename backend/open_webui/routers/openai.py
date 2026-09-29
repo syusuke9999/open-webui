@@ -56,6 +56,7 @@ from open_webui.utils.session_pool import (
     get_session,
     stream_wrapper,
 )
+from open_webui.utils.weave_tracing import start_provider_trace
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -1653,10 +1654,18 @@ async def generate_chat_completion(
     r = None
     streaming = False
     response = None
+    trace = None
 
     try:
         session = await get_session()
 
+        trace = start_provider_trace(
+            provider=api_config.get('provider') or 'openai-compatible',
+            operation='openai.responses' if is_responses else 'openai.chat.completions',
+            url=request_url,
+            payload=payload,
+            metadata=metadata,
+        )
         r = await session.request(
             method='POST',
             url=request_url,
@@ -1666,6 +1675,7 @@ async def generate_chat_completion(
             ssl=AIOHTTP_CLIENT_SESSION_SSL,
             timeout=get_client_timeout(stream=is_streaming_request),
         )
+        trace.set_status(r.status)
 
         # Check if response is SSE
         if 'text/event-stream' in r.headers.get('Content-Type', ''):
@@ -1674,6 +1684,7 @@ async def generate_chat_completion(
             # streaming the error back (which hides the error from logs).
             if r.status >= 400:
                 error_body = await r.text()
+                trace.finish(output=error_body)
                 log.error(
                     'Provider returned HTTP %d with SSE content-type: %s',
                     r.status,
@@ -1710,7 +1721,7 @@ async def generate_chat_completion(
 
             streaming = True
             return StreamingResponse(
-                stream_wrapper(r),
+                trace.wrap_stream(stream_wrapper(r), protocol='sse'),
                 status_code=r.status,
                 headers=_clean_proxy_headers(r.headers),
             )
@@ -1721,6 +1732,7 @@ async def generate_chat_completion(
                 log.error(e)
                 response = await r.text()
 
+            trace.finish(output=response)
             if r.status >= 400:
                 await publish_model_provider_request_failed(
                     request,
@@ -1742,7 +1754,13 @@ async def generate_chat_completion(
                 response = convert_responses_result(response)
 
             return response
+    except asyncio.CancelledError as e:
+        if trace is not None:
+            trace.finish(exception=e)
+        raise
     except Exception as e:
+        if trace is not None:
+            trace.finish(exception=e)
         log.exception(e)
 
         raise HTTPException(
@@ -1751,6 +1769,8 @@ async def generate_chat_completion(
         )
     finally:
         if not streaming:
+            if trace is not None:
+                trace.finish()
             await cleanup_response(r)
 
 
@@ -1914,6 +1934,7 @@ async def responses(
 
     r = None
     streaming = False
+    trace = None
 
     try:
         headers, cookies = await get_headers_and_cookies(request, url, key, api_config, user=user)
@@ -1936,6 +1957,13 @@ async def responses(
             request_url = f'{url}/responses'
 
         session = await get_session()
+        trace = start_provider_trace(
+            provider=api_config.get('provider') or 'openai-compatible',
+            operation='openai.responses',
+            url=request_url,
+            payload=body,
+            metadata=payload.get('metadata'),
+        )
         r = await session.request(
             method='POST',
             url=request_url,
@@ -1945,12 +1973,13 @@ async def responses(
             ssl=AIOHTTP_CLIENT_SESSION_SSL,
             timeout=get_client_timeout(stream=is_streaming_request),
         )
+        trace.set_status(r.status)
 
         # Check if response is SSE
         if 'text/event-stream' in r.headers.get('Content-Type', ''):
             streaming = True
             return StreamingResponse(
-                stream_wrapper(r, passthrough=True),
+                trace.wrap_stream(stream_wrapper(r, passthrough=True), protocol='sse'),
                 status_code=r.status,
                 headers=_clean_proxy_headers(r.headers),
             )
@@ -1960,6 +1989,7 @@ async def responses(
             except Exception:
                 response_data = await r.text()
 
+            trace.finish(output=response_data)
             if r.status >= 400:
                 await publish_model_provider_request_failed(
                     request,
@@ -1978,9 +2008,17 @@ async def responses(
 
             return response_data
 
-    except HTTPException:
+    except asyncio.CancelledError as e:
+        if trace is not None:
+            trace.finish(exception=e)
+        raise
+    except HTTPException as e:
+        if trace is not None:
+            trace.finish(exception=e)
         raise
     except Exception as e:
+        if trace is not None:
+            trace.finish(exception=e)
         log.exception(e)
         raise HTTPException(
             status_code=r.status if r else 500,
@@ -1988,6 +2026,8 @@ async def responses(
         )
     finally:
         if not streaming:
+            if trace is not None:
+                trace.finish()
             await cleanup_response(r)
 
 
