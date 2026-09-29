@@ -1,3 +1,5 @@
 # Optional W&B Weave tracing. Resolve together with requirements.txt or requirements-slim.txt
 # to preserve the application's OpenTelemetry pins (newer wandb releases may require newer ones).
 weave==0.52.36
+# gql 4.4 prefers httpx2 when installed, which rejects Weave's httpx.BasicAuth.
+gql[httpx]>=3.0.0,<4.4

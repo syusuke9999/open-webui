@@ -532,6 +532,41 @@ class InitializationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.flush_count, 2)
 
     @unittest.skipUnless(importlib.util.find_spec('weave'), 'optional Weave SDK is not installed')
+    def test_installed_sdk_graphql_transport_accepts_its_auth(self):
+        import gql.transport.httpx as gql_httpx
+        from weave.compat.wandb.wandb_thin import internal_api
+
+        real_transport = gql_httpx.HTTPXTransport
+        transports = []
+        requests = []
+
+        def respond(request):
+            requests.append(request)
+            return gql_httpx.httpx.Response(200, json={'data': {'serverInfo': {'frontendHost': 'https://weave.test'}}})
+
+        def offline_transport(**kwargs):
+            # Keep the real SDK auth and client constructor; replace only network I/O.
+            transport = real_transport(**kwargs, transport=gql_httpx.httpx.MockTransport(respond))
+            transports.append(transport)
+            return transport
+
+        try:
+            with (
+                patch.object(internal_api, 'get_wandb_api_context', return_value='synthetic-test-only'),
+                patch.object(internal_api.env, 'wandb_base_url', return_value='https://weave.test'),
+                patch.object(gql_httpx, 'HTTPXTransport', side_effect=offline_transport),
+            ):
+                result = internal_api.Api().server_info()
+        finally:
+            for transport in transports:
+                transport.close()
+
+        self.assertEqual(result, {'serverInfo': {'frontendHost': 'https://weave.test'}})
+        self.assertEqual(len(requests), 1)
+        self.assertEqual(str(requests[0].url), 'https://weave.test/graphql')
+        self.assertTrue(requests[0].headers['authorization'].startswith('Basic '))
+
+    @unittest.skipUnless(importlib.util.find_spec('weave'), 'optional Weave SDK is not installed')
     async def test_installed_sdk_accepts_initializer_and_exporter_contract(self):
         import weave
         from weave.trace.weave_client import WeaveClient
