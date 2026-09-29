@@ -6,11 +6,11 @@
 
 初期状態は無効です。有効にすると、会話本文、システムプロンプト、検索で挿入された情報、ツールの引数・結果も指定したW&Bプロジェクトへ送信されます。その内容を保存してよいプロジェクトを指定してください。APIキーはチャットに貼り付けず、サーバーの環境変数に設定します。
 
-| 環境変数 | 設定内容 |
-| --- | --- |
-| `ENABLE_WEAVE` | `true`で記録する。初期値は`false`。 |
-| `WEAVE_PROJECT` | W&Bの`entity/project`。例：`your-entity/open-webui`。 |
-| `WANDB_API_KEY` | そのプロジェクトに書き込めるW&B APIキー。モデルAPIのキーとは別。 |
+| 環境変数                  | 設定内容                                                                      |
+| ------------------------- | ----------------------------------------------------------------------------- |
+| `ENABLE_WEAVE`            | `true`で記録する。初期値は`false`。                                           |
+| `WEAVE_PROJECT`           | W&Bの`entity/project`。例：`your-entity/open-webui`。                         |
+| `WANDB_API_KEY`           | そのプロジェクトに書き込めるW&B APIキー。モデルAPIのキーとは別。              |
 | `WEAVE_MAX_CAPTURE_BYTES` | 入力・出力それぞれの記録量の目安。初期値は`2097152`（2 MiB）。1 KiB～32 MiB。 |
 
 キーやプロジェクトが未設定の場合、対話ログインは行わず記録を無効にし、バックエンドに理由を出力します。環境変数の変更後はOpen WebUIを再起動します。
@@ -60,16 +60,16 @@ $env:WANDB_API_KEY = 'your-wandb-api-key'
 4. `openai.chat.completions`、`openai.responses`、`ollama.chat`、`anthropic.messages`などの行を開きます。
 5. **Call**の`inputs`と`output`で送信・受信内容を確認します。Chat表示に対応する内容は**Chat**からも確認できます。
 
-| 項目 | 内容 |
-| --- | --- |
-| `inputs` | 実際に送信したJSON本文。`messages`、`input`、`instructions`、`tools`、生成パラメーターなど。 |
-| `output` | 通常応答はAPIのJSONまたはテキスト。ストリーミングは結合した内容と`raw_events`。 |
-| `output.raw_events` | ストリームから読み取ったJSONイベント。記録上限内で保存する。 |
-| `attributes` | プロバイダー、接続先、呼び出し元が渡したチャット・メッセージ等の識別情報。 |
-| `summary.status_code` | APIのHTTPステータス。接続前の失敗では未設定。 |
-| `summary.capture_truncated` | `true`なら記録の省略・上限到達があり、全文ではない。 |
-| `summary.usage` | APIから取得できた場合のトークン使用量。 |
-| エラー・所要時間 | HTTPエラー、ストリーム内エラー、途中停止などと、実際の通信開始・終了時刻。 |
+| 項目                        | 内容                                                                                         |
+| --------------------------- | -------------------------------------------------------------------------------------------- |
+| `inputs`                    | 実際に送信したJSON本文。`messages`、`input`、`instructions`、`tools`、生成パラメーターなど。 |
+| `output`                    | 通常応答はAPIのJSONまたはテキスト。ストリーミングは結合した内容と`raw_events`。              |
+| `output.raw_events`         | ストリームから読み取ったJSONイベント。記録上限内で保存する。                                 |
+| `attributes`                | プロバイダー、接続先、呼び出し元が渡したチャット・メッセージ等の識別情報。                   |
+| `summary.status_code`       | APIのHTTPステータス。接続前の失敗では未設定。                                                |
+| `summary.capture_truncated` | `true`なら記録の省略・上限到達があり、全文ではない。                                         |
+| `summary.usage`             | APIから取得できた場合のトークン使用量。                                                      |
+| エラー・所要時間            | HTTPエラー、ストリーム内エラー、途中停止などと、実際の通信開始・終了時刻。                   |
 
 ツール実行後の追加呼び出しや、タイトル・検索語などの内部生成も、対象の通信経路を使えば別の行になります。チャットID等の属性で関連する通信を絞り込めます。履歴の一括取り込みは行いません。
 
